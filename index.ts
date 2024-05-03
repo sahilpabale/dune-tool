@@ -1,14 +1,22 @@
 import moment from "moment";
 import { config } from "dotenv";
 import axios from "axios";
-import { exists, getLatestHourTimestamp, redis } from "./utils";
+import {
+  convertUnixTimestampToUTC,
+  exists,
+  getLatestHourTimestamp,
+  jsonToCsv,
+  redis,
+} from "./utils";
+import { DuneClient, ContentType } from "@duneanalytics/client-sdk";
 
 config();
 
 async function main() {
   const BIRDEYE_API_KEY = process.env.BIRDEYE_API_KEY;
   const DUNE_API_KEY = process.env.DUNE_API_KEY;
-  const MINT_QUERY_URL = process.env.MINT_QUERY_URL;
+
+  const dune = new DuneClient(DUNE_API_KEY!);
 
   let startDate = moment.utc("2023-06-01");
   let endDate = moment().endOf("day").add(1, "days");
@@ -18,6 +26,14 @@ async function main() {
     earliest_transfer: any;
     swap_count: number;
   }[];
+
+  // Load or initialize checkpoints from Redis
+  let checkpoints: { [mint: string]: number } = {};
+  const savedCheckpoints = await redis.get("checkpoints");
+  if (savedCheckpoints) {
+    console.log(savedCheckpoints);
+    checkpoints = savedCheckpoints as { [mint: string]: number };
+  }
 
   while (startDate.isBefore(endDate) || startDate.isSame(endDate, "month")) {
     // Unix timestamp for the beginning of the month
@@ -31,17 +47,24 @@ async function main() {
       .startOf("month")
       .unix();
 
-    const ohlcvStart = startOfMonthTimestamp + 3600;
-    const ohlcvEnd = startOfNextMonthTimestamp;
+    // const ohlcvStart = startOfMonthTimestamp + 3600;
+    // const ohlcvEnd = startOfNextMonthTimestamp;
 
-    console.log(
-      `Fetching: ${startDate.format("YYYY-MM")}`,
-      ohlcvStart,
-      ohlcvEnd,
-    );
+    // console.log(
+    //   `Fetching: ${startDate.format("YYYY-MM")}`,
+    //   ohlcvStart,
+    //   ohlcvEnd,
+    // );
 
     for (let i = 1; i < mintResponse.length; i++) {
       let { mint, swap_count, earliest_transfer } = mintResponse[i];
+
+      const lastFetchedTimestamp = checkpoints[mint] || startOfMonthTimestamp; // Get last fetched timestamp or start of month as default
+
+      const ohlcvStart = lastFetchedTimestamp + 3600; // Start from the last fetched timestamp
+      const ohlcvEnd = startOfNextMonthTimestamp;
+
+      console.log(`Fetching: ${startDate.format("YYYY-MM")} for mint ${mint}`);
 
       earliest_transfer = moment.utc(
         earliest_transfer,
@@ -97,7 +120,17 @@ async function main() {
         config,
       );
 
-      const items = data.data.items;
+      let items: any[] = [];
+
+      // Update checkpoint to the last data point timestamp
+      if (data.data.items.length > 0) {
+        const lastDataPointTimestamp =
+          data.data.items[data.data.items.length - 1].unixTime;
+        checkpoints[mint] = lastDataPointTimestamp;
+
+        // Save updated checkpoints to Redis after each successful fetch
+        await redis.set("checkpoints", JSON.stringify(checkpoints));
+      }
 
       if (data.data.items.length === 0) {
         console.log(
@@ -114,11 +147,9 @@ async function main() {
       let latestHourPassed = getLatestHourTimestamp(); // get the latest passed hour timestamp
 
       // check for duplicates
-      for (let item of data.data.items) {
-        if (!(item.v === 0 && item.unixTime > latestHourPassed)) {
-          items.push(item);
-        }
-      }
+      items = data.data.items.filter(
+        (item: any) => !(item.v === 0 && item.unixTime > latestHourPassed),
+      );
 
       const lastDataPoint = items[items.length - 1].unixTime; // new items array
 
@@ -137,6 +168,28 @@ async function main() {
           ohlcvEnd,
         );
         await redis.set(`${mint}_${ohlcvStart}_${ohlcvEnd}`, data);
+        let csvData = data.data.items.map((item: any) => {
+          return {
+            address: item.address,
+            unixTime: convertUnixTimestampToUTC(item.unixTime),
+            o: item.o,
+            h: item.h,
+            l: item.l,
+            c: item.c,
+            v: item.v,
+          };
+        });
+        // upload the csv to dune (data.data.items)
+        let csv = jsonToCsv(csvData);
+
+        const inserted = await dune.table.insert({
+          table_name: "prices",
+          namespace: "sahilpabale",
+          data: Buffer.from(csv),
+          content_type: ContentType.Csv,
+        });
+
+        console.log(`uploaded to dune  -`, inserted.rows_written);
       } else {
         // persist an incomplete period
         console.log(
@@ -154,6 +207,9 @@ async function main() {
     // Move to the next month
     startDate.add(1, "months");
   }
+
+  // Save updated checkpoints to Redis
+  await redis.set("checkpoints", JSON.stringify(checkpoints));
 }
 
 main();
