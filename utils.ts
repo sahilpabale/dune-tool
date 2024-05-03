@@ -1,6 +1,7 @@
 import { config } from "dotenv";
 import { Redis } from "@upstash/redis";
 import moment from "moment";
+import { DuneClient, ColumnType } from "@duneanalytics/client-sdk";
 
 config();
 
@@ -45,4 +46,58 @@ export const getLatestHourTimestamp = (): number => {
   }
 
   return latestHourMoment.unix();
+};
+
+export const jsonToCsv = (items: any) => {
+  const header = "address,unixTime,o,h,l,c,v".split(",");
+  const headerString = "mint,block_time,o,h,l,c,v";
+  // handle null or undefined values here
+  const replacer = (key: any, value: any) => value ?? "";
+  const rowItems = items.map((row: any) =>
+    header
+      .map((fieldName) => JSON.stringify(row[fieldName], replacer))
+      .join(","),
+  );
+  // join header and body, and break into separate lines
+  return [headerString, ...rowItems].join("\r\n");
+};
+
+export const findDifference = <T extends Record<string, any>>(
+  array1: T[],
+  array2: T[],
+) => {
+  const difference: T[] = [];
+
+  for (const obj2 of array2) {
+    let found = false;
+    for (const obj1 of array1) {
+      if (obj1.mint === obj2.mint && obj1.time === obj2.time) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      difference.push(obj2);
+    }
+  }
+
+  return difference;
+};
+
+export const createTable = async (client: DuneClient, table_name: string) => {
+  const result = await client.table.create({
+    namespace: "sahilpabale",
+    table_name,
+    schema: [
+      { name: "mint", type: ColumnType.Varchar },
+      { name: "block_time", type: ColumnType.Varchar },
+      { name: "o", type: ColumnType.Double },
+      { name: "h", type: ColumnType.Double },
+      { name: "l", type: ColumnType.Double },
+      { name: "c", type: ColumnType.Double },
+      { name: "v", type: ColumnType.Double },
+    ],
+  });
+
+  return result;
 };
