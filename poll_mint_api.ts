@@ -3,13 +3,19 @@
 import { config } from "dotenv";
 import axios from "axios";
 import { CronJob } from "cron";
-import { redis } from "./redis";
+import { findDifference, redis } from "./utils";
 
 config();
 
+type MintApi = {
+  mint: string;
+  earliest_transfer: string;
+  swap_count: number;
+};
+
 const poll = async () => {
   try {
-    const DUNE_API_KEY = process.env.DUNE_API_KEY;
+    const DUNE_API_KEY = process.env.DUNE_POLL_API_KEY;
     const MINT_QUERY_URL = process.env.MINT_QUERY_URL;
 
     let mintResponse = await axios.get(MINT_QUERY_URL as string, {
@@ -35,7 +41,12 @@ const poll = async () => {
       return;
     }
 
-    console.log("Mints have changed...updating store");
+    const newMints = findDifference(
+      storedMints as MintApi[],
+      mintResponse as unknown as MintApi[],
+    );
+
+    console.log("Mints have changed...updating store", newMints);
 
     await redis.set("mints", JSON.stringify(mintResponse));
   } catch (error) {
@@ -44,7 +55,7 @@ const poll = async () => {
 };
 
 const job = new CronJob(
-  "*/1 * * * *", // cronTime
+  "* */3 * * *", // cronTime
   poll, // onTick
   null, // onComplete
   true, // start
